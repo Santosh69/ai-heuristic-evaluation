@@ -77,6 +77,20 @@ This will start:
 - Firebase emulators on http://127.0.0.1:4000
 - API docs at http://localhost:8000/docs
 
+### Prerequisites: Download Model Weights
+
+This project uses **Microsoft OmniParser** for UI element detection, which requires downloading a custom YOLO model (~40MB).
+
+**Download the model:**
+
+```bash
+# Create weights directory
+mkdir -p weights/icon_detect
+
+# Download using wget
+wget https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
+  -O weights/icon_detect/model.pt
+
 ### Manual Setup
 
 1. **Start AI Heuristic Service**

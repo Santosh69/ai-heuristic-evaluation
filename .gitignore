@@ -167,8 +167,6 @@ Desktop.ini
 *~
 
 # Project-specific ignores
-*.md
-*.rst
 *.log
 *.logs
 logs/
@@ -205,3 +203,8 @@ ui-debug.log
 RUXAILAB/node_modules/
 RUXAILAB/dist/
 RUXAILAB/.firebase/
+
+# Model weights
+weights/**/*.pt
+weights/**/*.pth
+weights/**/*.bin

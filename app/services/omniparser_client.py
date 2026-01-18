@@ -208,7 +208,7 @@ class OmniParserClient:
     async def initialize(self):
         self.logger.info("Initializing OmniParser client...")
         # Loading YOLO 
-        self.yolo_model = YOLO("weights/icon_detect/best.pt")
+        self.yolo_model = YOLO("weights/icon_detect/model.pt")
         
         # Loading Florence-2 
         self.caption_model = AutoModelForCausalLM.from_pretrained(
