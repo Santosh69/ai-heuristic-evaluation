@@ -68,15 +68,26 @@ This system combines Microsoft's OmniParser for UI element detection with LLM-ba
 
 This project uses **Microsoft OmniParser** for UI element detection, which requires downloading a custom YOLO model (~40MB).
 
+
 **Download the model:**
 
 ```bash
 # Create weights directory
 mkdir -p weights/icon_detect
+```
 
-# Download using wget
+You can use either `wget` or `curl` to download the model:
+
+**Using wget:**
+```bash
 wget https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
   -O weights/icon_detect/model.pt
+```
+
+**Or using curl:**
+```bash
+curl -L https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
+  -o weights/icon_detect/model.pt
 ```
 
 ### Using the Development Script
