@@ -64,19 +64,6 @@ This system combines Microsoft's OmniParser for UI element detection with LLM-ba
 
 ## Quick Start
 
-### Using the Development Script
-
-```bash
-chmod +x start-dev.sh
-./start-dev.sh
-```
-
-This will start:
-- RUXAILAB Vue.js app on http://localhost:8081
-- AI Heuristic API on http://localhost:8000
-- Firebase emulators on http://127.0.0.1:4000
-- API docs at http://localhost:8000/docs
-
 ### Prerequisites: Download Model Weights
 
 This project uses **Microsoft OmniParser** for UI element detection, which requires downloading a custom YOLO model (~40MB).
@@ -90,6 +77,20 @@ mkdir -p weights/icon_detect
 # Download using wget
 wget https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
   -O weights/icon_detect/model.pt
+```
+
+### Using the Development Script
+
+```bash
+chmod +x start-dev.sh
+./start-dev.sh
+```
+
+This will start:
+- RUXAILAB Vue.js app on http://localhost:8081
+- AI Heuristic API on http://localhost:8000
+- Firebase emulators on http://127.0.0.1:4000
+- API docs at http://localhost:8000/docs
 
 ### Manual Setup
 
