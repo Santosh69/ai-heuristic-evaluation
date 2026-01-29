@@ -80,13 +80,13 @@ You can use either `wget` or `curl` to download the model:
 
 **Using wget:**
 ```bash
-wget https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
+wget https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
   -O weights/icon_detect/model.pt
 ```
 
 **Or using curl:**
 ```bash
-curl -L https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect/model.pt \
+curl -L https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
   -o weights/icon_detect/model.pt
 ```
 
