@@ -198,6 +198,8 @@ _test.py
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
+firebase.json
+.firebaserc
 
 # RUXAILAB
 RUXAILAB/node_modules/
@@ -205,6 +207,4 @@ RUXAILAB/dist/
 RUXAILAB/.firebase/
 
 # Model weights
-weights/**/*.pt
-weights/**/*.pth
-weights/**/*.bin
+weights/

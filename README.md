@@ -64,40 +64,15 @@ This system combines Microsoft's OmniParser for UI element detection with LLM-ba
 
 ## Quick Start
 
-### Prerequisites: Download Model Weights
-
-This project uses **Microsoft OmniParser** for UI element detection, which requires downloading a custom YOLO model (~40MB).
-
-
-**Download the model:**
+### Quick Start (Recommended)
 
 ```bash
-# Create weights directory
-mkdir -p weights/icon_detect
-```
-
-You can use either `wget` or `curl` to download the model:
-
-**Using wget:**
-```bash
-wget https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
-  -O weights/icon_detect/model.pt
-```
-
-**Or using curl:**
-```bash
-curl -L https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
-  -o weights/icon_detect/model.pt
-```
-
-### Using the Development Script (Cross-platform)
-
-```bash
+pip install -r requirements.txt
 python start-dev.py
 ```
 
 This script is cross-platform (Windows, macOS, Linux). It will:
-- Verify/download OmniParser weights
+- Verify/download OmniParser weights (via `scripts/setup_omniparser.py`)
 - Start the FastAPI backend on http://localhost:8000
 - Start Firebase Functions emulators (if `firebase-functions/` exists)
 
@@ -105,20 +80,66 @@ If you need Firebase emulators, make sure you have:
 - `firebase.json` (emulator config)
 - `.firebaserc` (project/alias mapping)
 
-### Manual Setup
+### Model Weights
 
-1. **Start AI Heuristic Service**
+This project uses **Microsoft OmniParser** for UI element detection. You need two weight sets.
+
+| Path | Purpose |
+| --- | --- |
+| `weights/icon_detect/model.pt` | YOLO icon detector |
+| `weights/icon_caption_florence/` | Florence caption model (config, tokenizer, weights) |
+
+**Preferred (automatic):**
 ```bash
-cd ai-heuristic-evaluation
+python scripts/setup_omniparser.py
+```
+This script downloads and lays out the required OmniParser weights if they are missing.
+
+### Manual Setup (Advanced)
+
+1. **Install Python dependencies**
+```bash
 pip install -r requirements.txt
+```
+
+2. **Download model weights manually**  
+Use this only if you cannot run `scripts/setup_omniparser.py`.
+
+**Option A (recommended manual): download both sets with Python**
+```bash
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='microsoft/OmniParser-v2.0', local_dir='weights', allow_patterns=['icon_detect/*','icon_caption/*'])"
+python -c "import os; os.rename('weights/icon_caption','weights/icon_caption_florence')"
+```
+
+**Option B: download only the YOLO detector with wget or curl**
+```bash
+mkdir -p weights/icon_detect
+```
+
+Using wget:
+```bash
+wget https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
+  -O weights/icon_detect/model.pt
+```
+
+Or using curl:
+```bash
+curl -L https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt \
+  -o weights/icon_detect/model.pt
+```
+
+You still need the Florence caption model under `weights/icon_caption_florence/`.
+The reliable way to get that is Option A above.
+
+3. **Start AI Heuristic Service**
+```bash
 python main.py
 ```
 
-2. **Start RUXAILAB**
+4. **Start Firebase Functions (optional)**
 ```bash
-cd ../RUXAILAB
+cd firebase-functions
 npm install
-firebase emulators:start
 npm run serve
 ```
 
