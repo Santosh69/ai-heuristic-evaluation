@@ -5,6 +5,7 @@ import os
 import sys
 import subprocess
 import signal
+import shutil
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -38,12 +39,15 @@ firebase_dir = PROJECT_ROOT / "firebase-functions"
 firebase_process = None
 
 if firebase_dir.is_dir():
-    print("Starting firebase-functions (if configured)...")
-    firebase_process = subprocess.Popen(
-        ["npm", "run", "serve"],
-        cwd=firebase_dir,
-        shell=(os.name == "nt")
-    )
+    if shutil.which("npm") is None:
+        print("npm not found in PATH. Skipping firebase-functions.")
+    else:
+        print("Starting firebase-functions (if configured)...")
+        firebase_process = subprocess.Popen(
+            ["npm", "run", "serve"],
+            cwd=firebase_dir,
+            shell=(os.name == "nt")
+        )
 else:
     print("firebase-functions not found. Skipping frontend/emulator.")
 
