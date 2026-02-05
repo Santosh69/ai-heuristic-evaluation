@@ -1,3 +1,6 @@
+from app.utils.transformers_patches import patch_transformers_flash_attn_check
+patch_transformers_flash_attn_check()
+
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
@@ -203,22 +206,38 @@ class OmniParserClient:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.model_loaded = False
+        self.yolo_model = None       # YOLO model for element detection
         self.caption_model = None  # Florence-2 model for captioning
+        self.processor = None      # Processor for Florence-2
 
     async def initialize(self):
         self.logger.info("Initializing OmniParser client...")
         # Loading YOLO 
+        self.logger.info("Loading YOLO model...")
         self.yolo_model = YOLO("weights/icon_detect/model.pt")
-        
+        self.logger.info("✅ YOLO model loaded")
+
+        device = (
+            "cuda" if torch.cuda.is_available() else
+            "mps" if torch.backends.mps.is_available() else
+            "cpu"
+        )
+
+        self.device = device
+        self.logger.info(f"Using device: {device}")
         # Loading Florence-2 
         self.caption_model = AutoModelForCausalLM.from_pretrained(
             "weights/icon_caption_florence", 
-            trust_remote_code=True
-        )
-        self.processor = AutoProcessor.from_pretrained(
-            "weights/icon_caption_florence", 
-            trust_remote_code=True
-        )
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            attn_implementation="eager",
+            low_cpu_mem_usage=True,
+        ).to(device)
+        
+        self.logger.info("✅ Florence model loaded")
+        self.processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
+        self.logger.info("✅ Florence processor loaded")
+        self.caption_model.eval()
         self.model_loaded = True
         self.logger.info("OmniParser client initialized successfully")
 
@@ -244,8 +263,10 @@ class OmniParserClient:
             width, height = image.size
             self.logger.info(f"Processing image: {width}x{height}")
 
+            # YOLO detection
             results = self.yolo_model(image)
             elements = []
+            
             for result in results:
                 for box in result.boxes:
                     # Get coordinates
@@ -271,18 +292,22 @@ class OmniParserClient:
                 metadata={
                     "width": width,
                     "height": height,
-                    "total_elements": len(elements)
+                    "total_elements": len(elements),
+                    "florence_enabled": self.caption_model is not None
                 }
             )
 
-            self.logger.info(f"Detection complete: {len(elements)} elements found")
+            self.logger.info(
+                f"Detection complete: {len(elements)} elements, "
+                f"Florence: {'ON' if self.caption_model else 'OFF'}"
+            )
             return result
 
         except InvalidInputError:
             # Re-raise validation errors
             raise
         except Exception as e:
-            self.logger.error(f"Error in element detection: {str(e)}")
+            self.logger.error(f"Error in detection: {str(e)}", exc_info=True)
             raise OmniParserError(
                 message="Failed to detect UI elements",
                 details={"error": str(e)}
