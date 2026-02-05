@@ -90,18 +90,20 @@ curl -L https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detec
   -o weights/icon_detect/model.pt
 ```
 
-### Using the Development Script
+### Using the Development Script (Cross-platform)
 
 ```bash
-chmod +x start-dev.sh
-./start-dev.sh
+python start-dev.py
 ```
 
-This will start:
-- RUXAILAB Vue.js app on http://localhost:8081
-- AI Heuristic API on http://localhost:8000
-- Firebase emulators on http://127.0.0.1:4000
-- API docs at http://localhost:8000/docs
+This script is cross-platform (Windows, macOS, Linux). It will:
+- Verify/download OmniParser weights
+- Start the FastAPI backend on http://localhost:8000
+- Start Firebase Functions emulators (if `firebase-functions/` exists)
+
+If you need Firebase emulators, make sure you have:
+- `firebase.json` (emulator config)
+- `.firebaserc` (project/alias mapping)
 
 ### Manual Setup
 
