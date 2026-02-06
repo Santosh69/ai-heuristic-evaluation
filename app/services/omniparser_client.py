@@ -10,10 +10,12 @@ import json
 from ultralytics import YOLO
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM
+import re  # For cleaning Florence output
 
 
 
 TYPE_MAPPING = {
+    "icon":  "icon",
     "clickable_button": "button",
     "icon_button": "button",
     "submit_button": "button",
@@ -275,14 +277,76 @@ class OmniParserClient:
                     # Get type 
                     cls_id = int(box.cls[0])
                     raw_type  = self.yolo_model.names[cls_id]
+                    self.logger.info(f"YOLO detected: {raw_type} (class {cls_id})")
                     mapped_type = self._map_element_type(raw_type)
 
-                    # Create Element matching new Omniparser format
+                    # FLORENCE CAPTIONING - Makes content DYNAMIC
+                    element_content = ""
+                    if self.caption_model is not None and self.processor is not None:
+                        try:
+                            # Crop the detected element
+                            crop_x1 = max(0, int(x1))
+                            crop_y1 = max(0, int(y1))
+                            crop_x2 = min(width, int(x2))
+                            crop_y2 = min(height, int(y2))
+                            
+                            if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+                                continue
+
+                            element_crop = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                            self.logger.info(f"Crop format: {element_crop.mode}, size: {element_crop.size}")
+                            
+                            if element_crop.mode != "RGB":
+                                element_crop = element_crop.convert("RGB")
+
+                            # Skip very small elements
+                            if element_crop.width >= 10 and element_crop.height >= 10:
+                                # Use Florence to generate caption
+                                prompt = "<CAPTION>"
+                                inputs = self.processor(
+                                    text=prompt, 
+                                    images=element_crop, 
+                                    return_tensors="pt"
+                                ).to(self.device)
+                                
+                                # Generate caption
+                                with torch.no_grad():
+                                    generated_ids = self.caption_model.generate(
+                                        input_ids=inputs["input_ids"],
+                                        pixel_values=inputs["pixel_values"],
+                                        max_new_tokens=50,
+                                        num_beams=3
+                                    )
+                                
+                                # Decode caption
+                                generated_text = self.processor.batch_decode(
+                                    generated_ids, 
+                                    skip_special_tokens=False
+                                )[0]
+                                self.logger.info(f"Florence raw output: {repr(generated_text)}")
+                                # Extract caption (remove tags)
+                                element_content = (
+                                    generated_text
+                                    .replace("<s>", "")
+                                    .replace("</s>", "")
+                                    .replace("<CAPTION>", "")
+                                    .replace("</CAPTION>", "")
+                                    .replace("<pad>", "")
+                                    .strip()
+                                )
+                                if element_content:
+                                    self.logger.info(f"Caption: {element_content[:50]}")
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Failed to caption {mapped_type}: {e}")
+                            element_content = ""
+
+                    # Create Element with DYNAMIC content from Florence
                     elements.append(UIElement(
                         element_type=mapped_type,
                         bbox=[x1, y1, x2, y2],
-                        content="",  # Placeholder for now
-                        interactivity=False # Default to False as we don't infer it yet
+                        content=element_content,  
+                        interactivity=mapped_type in ["button", "input", "link"]
                     ))
 
             layout_hierarchy = {}
@@ -336,3 +400,18 @@ class OmniParserClient:
                 grouped["content"].append(element)
 
         return grouped
+
+    def validate_image(self, image_data: bytes, content_type: str):
+        """Validate image data and content type."""
+        if not image_data:
+            raise InvalidInputError("No image data provided")
+        
+        if len(image_data) > MAX_IMAGE_SIZE_BYTES:
+            raise InvalidInputError(
+                f"Image too large: {len(image_data)} bytes (max: {MAX_IMAGE_SIZE_BYTES})"
+            )
+        
+        if content_type not in ALLOWED_IMAGE_TYPES:
+            raise InvalidInputError(
+                f"Unsupported image type: {content_type}. Allowed: {ALLOWED_IMAGE_TYPES}"
+            )
