@@ -1,10 +1,7 @@
 import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from typing import Optional
-from PIL import Image
-import io
 
-from app.services.omniparser_client import OmniParserClient, UIElementDetectionResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,11 +34,11 @@ async def detect_ui_elements(
 
 @router.post("/analyze")
 async def analyze_interface(
+    request: Request,
     image: UploadFile = File(...)
 ):
     try:
-        client = OmniParserClient()
-        await client.initialize()
+        client = request.app.state.omniparser_client
 
         contents = await image.read()
         result = await client.detect_elements(contents)

@@ -2,14 +2,13 @@ import logging
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import asyncio
 from openai import AsyncOpenAI
 
 from app.core.constants import NIELSEN_HEURISTICS, HeuristicId, SeverityLevel
 from app.core.config import settings
 from app.services.omniparser_client import UIElementDetectionResult, UIElement
 from app.services.rag_knowledge_base import RAGKnowledgeBase
-from app.services.exceptions import ModelInferenceError, InvalidInputError
+from app.services.exceptions import ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
@@ -111,24 +110,28 @@ class HeuristicEvaluationEngine:
     Evaluation Method: LLM-based with prompt engineering
     
     Example Usage:
-        engine = HeuristicEvaluationEngine()
+        engine = request.app.state.heuristic_engine
         result = await engine.evaluate_interface(detection_result)
     """
     
-    def __init__(self):
+    def __init__(self, rag_kb: Optional[RAGKnowledgeBase] = None):
         self.logger = logging.getLogger(__name__)
         self.llm_client = None
-        self.rag_kb = None
+        self.rag_kb = rag_kb
         self.initialized = False
 
     async def initialize(self):
+        if self.initialized:
+            return
         self.logger.info("Initializing Heuristic Evaluation Engine...")
         self.llm_client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_BASE_URL
         )
-        self.rag_kb = RAGKnowledgeBase()
-        await self.rag_kb.initialize()
+        if self.rag_kb is None:
+            raise RuntimeError("RAGKnowledgeBase dependency missing. Inject via startup.")
+        if not self.rag_kb.index_initialized:
+            await self.rag_kb.initialize()
         self.initialized = True
         self.logger.info("Heuristic Evaluation Engine initialized")
 

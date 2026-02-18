@@ -1,11 +1,11 @@
 import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File, Body, Request
-from typing import Optional, List
-import json
+from typing import List
 
-from app.services.heuristic_engine import HeuristicEvaluationEngine
-from app.core.config import settings, ALLOWED_IMAGE_TYPES
-from app.services.exceptions import InvalidInputError
+from app.core.config import ALLOWED_IMAGE_TYPES
+from app.services.exceptions import InvalidInputError, ModelInferenceError, RAGKnowledgeBaseError
+from app.services.omniparser_client import UIElement
+from app.core.constants import HeuristicId, NIELSEN_HEURISTICS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -55,12 +55,13 @@ async def evaluate_heuristics(
         detection_client = request.app.state.omniparser_client
         contents = await image.read()
         
-        detection_result = await detection_client.detect_elements(contents)
+        detection_result = await detection_client.detect_elements(
+            contents,
+            content_type=content_type
+        )
 
-        # Initialize evaluation engine and evaluate
-        evaluation_engine = HeuristicEvaluationEngine()
-        await evaluation_engine.initialize()
-
+        # Use singleton evaluation engine and evaluate
+        evaluation_engine = request.app.state.heuristic_engine
         evaluation_result = await evaluation_engine.evaluate_interface(detection_result)
 
         return {
@@ -82,6 +83,7 @@ async def evaluate_heuristics(
 
 @router.post("/evaluate-legacy/{heuristic_id}")
 async def evaluate_legacy_format(
+    request: Request,
     heuristic_id: str,
     elements: List[dict] = Body(...)
 ):
@@ -100,7 +102,6 @@ async def evaluate_legacy_format(
         500: Unexpected server error
     """
     try:
-        from app.core.constants import HeuristicId
 
         # Normalize heuristic_id to uppercase
         normalized_id = heuristic_id.upper()
@@ -113,10 +114,8 @@ async def evaluate_legacy_format(
                 }
             )
 
-        evaluation_engine = HeuristicEvaluationEngine()
-        await evaluation_engine.initialize()
+        evaluation_engine = request.app.state.heuristic_engine
 
-        from app.services.omniparser_client import UIElement
         try:
             ui_elements = [UIElement.from_dict(e) for e in elements]
         except Exception as e:
@@ -168,8 +167,6 @@ async def evaluate_legacy_format(
 
 @router.get("/heuristics")
 async def get_heuristics():
-    from app.core.constants import NIELSEN_HEURISTICS
-
     return {
         "success": True,
         "data": {
@@ -183,7 +180,7 @@ async def get_heuristics():
     }
 
 @router.get("/knowledge-base/stats")
-async def get_knowledge_base_stats():
+async def get_knowledge_base_stats(request: Request):
     """Get statistics about the RAG knowledge base.
     
     Returns:
@@ -194,10 +191,7 @@ async def get_knowledge_base_stats():
         500: Unexpected server error
     """
     try:
-        from app.services.rag_knowledge_base import RAGKnowledgeBase
-
-        kb = RAGKnowledgeBase()
-        await kb.initialize()
+        kb = request.app.state.rag_knowledge_base
         stats = await kb.get_stats()
 
         return {

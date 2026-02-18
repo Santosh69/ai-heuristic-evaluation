@@ -1,9 +1,6 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import logging
-import os
-from pathlib import Path
 
 from app.core.config import settings
 from app.services.heuristic_engine import HeuristicEvaluationEngine
@@ -32,23 +29,27 @@ app.include_router(evaluation.router, prefix="/api/v1/evaluation", tags=["evalua
 
 @app.on_event("startup")
 async def startup_event():
-    # Initialize OmniParser Client (Singleton)
-    app.state.omniparser_client = OmniParserClient()
-    await app.state.omniparser_client.initialize()
-    
     setup_logging()
     logger = logging.getLogger(__name__)
     logger.info("AI Heuristic Evaluation API starting up...")
 
-    # Initialize singleton OmniParser client to avoid re-initializing model on every request
+    # Initialize OmniParser Client (Singleton)
     app.state.omniparser_client = OmniParserClient()
     await app.state.omniparser_client.initialize()
     logger.info("OmniParser client initialized (singleton)")
 
-    heuristic_engine = HeuristicEvaluationEngine()
-    await heuristic_engine.initialize()
+    # Initialize RAG Knowledge Base (Singleton)
+    app.state.rag_knowledge_base = RAGKnowledgeBase()
+    await app.state.rag_knowledge_base.initialize()
+    logger.info("RAG knowledge base initialized")
 
+    # Initilize Hueristic Evaluation Engine (Singleton)
+    app.state.heuristic_engine = HeuristicEvaluationEngine(
+        rag_kb=app.state.rag_knowledge_base
+    )
+    await app.state.heuristic_engine.initialize()
     logger.info("Heuristic evaluation engine initialized")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
