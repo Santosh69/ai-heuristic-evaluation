@@ -41,14 +41,14 @@ async def startup_event():
     # Initialize RAG Knowledge Base (Singleton)
     app.state.rag_knowledge_base = RAGKnowledgeBase()
     await app.state.rag_knowledge_base.initialize()
-    logger.info("RAG knowledge base initialized")
+    logger.info("RAG knowledge base initialized (singleton)")
 
     # Initilize Hueristic Evaluation Engine (Singleton)
     app.state.heuristic_engine = HeuristicEvaluationEngine(
         rag_kb=app.state.rag_knowledge_base
     )
     await app.state.heuristic_engine.initialize()
-    logger.info("Heuristic evaluation engine initialized")
+    logger.info("Heuristic evaluation engine initialized (singleton)")
 
 
 @app.on_event("shutdown")
