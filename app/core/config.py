@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
     HOST: str = Field(default="0.0.0.0", env="HOST")
     PORT: int = Field(default=8000, env="PORT")
+    FLORENCE_BATCH_SIZE: int = Field(default=3, env="FLORENCE_BATCH_SIZE", ge=1)
 
     class Config:
         env_file = ".env"
         case_sensitive = True
 
 settings = Settings()
+
+# Runtime tuning knobs used by services
+FLORENCE_BATCH_SIZE = settings.FLORENCE_BATCH_SIZE

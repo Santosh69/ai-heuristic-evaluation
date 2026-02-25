@@ -32,7 +32,7 @@ TYPE_MAPPING = {
 }
 
 from app.services.exceptions import InvalidInputError, OmniParserError
-from app.core.config import ALLOWED_IMAGE_TYPES, MAX_IMAGE_SIZE_BYTES
+from app.core.config import ALLOWED_IMAGE_TYPES, MAX_IMAGE_SIZE_BYTES, FLORENCE_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +246,114 @@ class OmniParserClient:
     def _map_element_type(self, raw_type: str) -> str:
         return TYPE_MAPPING.get(raw_type.lower(), "unknown")
 
+    def _is_probable_oom(self, err: Exception) -> bool:
+        msg = str(err).lower()
+
+        # Retry only when the error looks like an out-of-memory error.
+        return (
+            isinstance(err, MemoryError)
+            or "out of memory" in msg
+            or "cuda out of memory" in msg
+            or "not enough memory" in msg
+            or "std::bad_alloc" in msg
+            or ("mps" in msg and "memory" in msg)
+        )
+
+    def florence_batch_caption(self, batch, elements):
+        # Run one Florence caption pass for this batch and write captions back to elements by index.
+
+        if not batch:
+            return
+        images = [crop for _, crop in batch]
+        prompts = ["<CAPTION>"] * len(images)
+
+        batch_ids = [idx for idx, _ in batch]
+        self.logger.info(
+        f"FLORENCE_BATCH_START size={len(batch)} element_ids={batch_ids}"
+        )
+        
+
+        inputs = self.processor(
+            text = prompts,
+            images = images,
+            return_tensors = "pt"
+        ).to(self.device)
+
+        self.logger.info(
+            f"FLORENCE_INPUT_SHAPE pixel_values={tuple(inputs['pixel_values'].shape)} "
+            f"input_ids={tuple(inputs['input_ids'].shape)}"
+        )
+
+        with torch.no_grad():
+            generated_ids = self.caption_model.generate(
+                input_ids = inputs["input_ids"],
+                pixel_values = inputs["pixel_values"],
+                max_new_tokens = 30,
+                num_beams = 1
+            )
+            decoded = self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens = False
+            )
+            for (element_index, _), generated_text in zip(batch, decoded):
+                cleaned_output = (
+                    generated_text
+                    .replace("<s>", "")
+                    .replace("</s>", "")
+                    .replace("<CAPTION>", "")
+                    .replace("</CAPTION>", "")
+                    .replace("<pad>", "")
+                    .strip()
+                )
+                elements[element_index].content = cleaned_output
+                if cleaned_output:
+                    self.logger.info(f"Florence caption for element {element_index}: {cleaned_output[:50]}")
+
+    def florence_batch_caption_adaptive(self, jobs, elements, max_batch_size: int) -> None:
+        """Caption jobs with retry + halving on probable OOM failures."""
+        if not jobs:
+            return
+        if max_batch_size < 1:
+            raise ValueError("max_batch_size must be >= 1")
+
+        # Process caption jobs in chunks and reduce chunk size if a batch runs out of memory.
+
+        i = 0
+        while i < len(jobs):
+            remaining = len(jobs) - i
+            chunk_size = min(max_batch_size, remaining)
+
+            while chunk_size >= 1:
+                chunk = jobs[i:i + chunk_size]
+                try:
+                    self.logger.info(
+                        f"FLORENCE_ADAPTIVE_TRY size={chunk_size} "
+                        f"remaining={remaining} start_index={i}"
+                    )
+                    self.florence_batch_caption(chunk, elements)
+                    i += chunk_size
+                    break
+                except Exception as e:
+                    if not self._is_probable_oom(e):
+                        raise
+
+                    self.logger.warning(
+                        f"FLORENCE_OOM size={chunk_size}, halving batch: {e}"
+                    )
+
+                    if self.device == "cuda":
+                        torch.cuda.empty_cache()
+
+                    if chunk_size == 1:
+                        failed_element_idx, _ = chunk[0]
+                        self.logger.warning(
+                            f"Skipping caption for element {failed_element_idx} after OOM at size=1"
+                        )
+                        i += 1
+                        break
+
+                    chunk_size = max(1, chunk_size // 2)
+
     async def detect_elements(
         self,
         image_data: bytes,
@@ -268,7 +376,8 @@ class OmniParserClient:
             # YOLO detection
             results = self.yolo_model(image)
             elements = []
-            
+            batch_crops: list[tuple[int, Image.Image]] = []  # List of (index, cropped element) for captioning
+
             for result in results:
                 for box in result.boxes:
                     # Get coordinates
@@ -280,18 +389,29 @@ class OmniParserClient:
                     self.logger.info(f"YOLO detected: {raw_type} (class {cls_id})")
                     mapped_type = self._map_element_type(raw_type)
 
+                    # Crop the detected element
+                    crop_x1 = max(0, int(x1))
+                    crop_y1 = max(0, int(y1))
+                    crop_x2 = min(width, int(x2))
+                    crop_y2 = min(height, int(y2))
+                    
+                    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+                        continue
+                    
+                    # Always preserve the detection result even if captioning is unavailable/fails later.
+                    elements.append(UIElement(
+                        element_type = mapped_type, 
+                        bbox=[crop_x1, crop_y1, crop_x2, crop_y2],
+                        content = "",
+                        interactivity = mapped_type in ["button", "input", "link"]
+                    ))
+
                     # FLORENCE CAPTIONING - Makes content DYNAMIC
                     element_content = ""
+                    
                     if self.caption_model is not None and self.processor is not None:
                         try:
-                            # Crop the detected element
-                            crop_x1 = max(0, int(x1))
-                            crop_y1 = max(0, int(y1))
-                            crop_x2 = min(width, int(x2))
-                            crop_y2 = min(height, int(y2))
                             
-                            if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-                                continue
 
                             element_crop = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
                             self.logger.info(f"Crop format: {element_crop.mode}, size: {element_crop.size}")
@@ -299,56 +419,46 @@ class OmniParserClient:
                             if element_crop.mode != "RGB":
                                 element_crop = element_crop.convert("RGB")
 
-                            # Skip very small elements
-                            if element_crop.width >= 10 and element_crop.height >= 10:
-                                # Use Florence to generate caption
-                                prompt = "<CAPTION>"
-                                inputs = self.processor(
-                                    text=prompt, 
-                                    images=element_crop, 
-                                    return_tensors="pt"
-                                ).to(self.device)
-                                
-                                # Generate caption
-                                with torch.no_grad():
-                                    generated_ids = self.caption_model.generate(
-                                        input_ids=inputs["input_ids"],
-                                        pixel_values=inputs["pixel_values"],
-                                        max_new_tokens=50,
-                                        num_beams=3
+                            elements_idx = len(elements) - 1
+                            batch_crops.append((elements_idx, element_crop))
+                            self.logger.info(f"Added element {elements_idx} to caption batch (type: {mapped_type})")
+
+                            # Flush when the queue reaches the configured target; adaptive splitting happens inside.
+                            if (len(batch_crops) == FLORENCE_BATCH_SIZE):
+                                try:
+                                    self.logger.info(f"Processing batch of {len(batch_crops)} elements with Florence...")
+                                    self.florence_batch_caption_adaptive(
+                                        batch_crops,
+                                        elements,
+                                        FLORENCE_BATCH_SIZE
                                     )
-                                
-                                # Decode caption
-                                generated_text = self.processor.batch_decode(
-                                    generated_ids, 
-                                    skip_special_tokens=False
-                                )[0]
-                                self.logger.info(f"Florence raw output: {repr(generated_text)}")
-                                # Extract caption (remove tags)
-                                element_content = (
-                                    generated_text
-                                    .replace("<s>", "")
-                                    .replace("</s>", "")
-                                    .replace("<CAPTION>", "")
-                                    .replace("</CAPTION>", "")
-                                    .replace("<pad>", "")
-                                    .strip()
-                                )
-                                if element_content:
-                                    self.logger.info(f"Caption: {element_content[:50]}")
-                                
+                                except Exception as e:
+                                    self.logger.warning(f"Failed to batch caption elements: {e}")
+                                finally:
+                                    batch_crops.clear()
+                                    self.logger.info(f"BATCH_AFTER_CLEAR len={len(batch_crops)}")
+
+                                    
+                      
                         except Exception as e:
                             self.logger.warning(f"Failed to caption {mapped_type}: {e}")
                             element_content = ""
 
-                    # Create Element with DYNAMIC content from Florence
-                    elements.append(UIElement(
-                        element_type=mapped_type,
-                        bbox=[x1, y1, x2, y2],
-                        content=element_content,  
-                        interactivity=mapped_type in ["button", "input", "link"]
-                    ))
-
+            if batch_crops:
+                # Flush leftover detections that did not fill a complete batch.
+                try:
+                    self.logger.info(f"BATCH_FINAL_FLUSH_TRIGGER len={len(batch_crops)}")
+                    self.florence_batch_caption_adaptive(
+                        batch_crops,
+                        elements,
+                        FLORENCE_BATCH_SIZE
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed final batch caption elements: {e}")
+                finally:
+                    batch_crops.clear()
+                    self.logger.info(f"BATCH_FINAL_AFTER_CLEAR len={len(batch_crops)}")
+              
             layout_hierarchy = {}
             result = UIElementDetectionResult(
                 elements=elements,
