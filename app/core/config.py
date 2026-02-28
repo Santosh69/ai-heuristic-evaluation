@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = Field(default="", env="OPENAI_API_KEY")
     OPENAI_MODEL: str = Field(default="gpt-4", env="OPENAI_MODEL")
     OPENAI_BASE_URL: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
+    LLM_PROVIDER: str = Field(default="openai", env="LLM_PROVIDER")
+    GEMINI_API_KEY: str = Field(default="", env="GEMINI_API_KEY")
+    GEMINI_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL")
+
     FIREBASE_PROJECT_ID: str = Field(default="", env="FIREBASE_PROJECT_ID")
     FIREBASE_SERVICE_ACCOUNT_KEY: str = Field(default="", env="FIREBASE_SERVICE_ACCOUNT_KEY")
     FAISS_INDEX_PATH: str = Field(default="./data/knowledge_base.index", env="FAISS_INDEX_PATH")

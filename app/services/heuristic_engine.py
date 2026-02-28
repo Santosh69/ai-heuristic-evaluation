@@ -3,6 +3,8 @@ import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 from app.core.constants import NIELSEN_HEURISTICS, HeuristicId, SeverityLevel
 from app.core.config import settings
@@ -38,6 +40,15 @@ class HeuristicViolation:
             "affected_elements": self.affected_elements,
             "recommendation": self.recommendation
         }
+
+class HeuristicLLMAnalysis:
+    def __init__(
+        self,
+        violations: List["HeuristicViolation"],
+        llm_explanation: Optional[str] = None
+    ):
+        self.violations = violations
+        self.llm_explanation = llm_explanation
 
 class HeuristicScore:
     def __init__(
@@ -116,7 +127,11 @@ class HeuristicEvaluationEngine:
     
     def __init__(self, rag_kb: Optional[RAGKnowledgeBase] = None):
         self.logger = logging.getLogger(__name__)
-        self.llm_client = None
+        self.llm_client = None  # Backward-compatible alias for the OpenAI client path
+        self.llm_provider = "openai"
+        self.openai_client = None
+        self.gemini_client = None
+        self.gemini_aio = None
         self.rag_kb = rag_kb
         self.initialized = False
 
@@ -124,16 +139,156 @@ class HeuristicEvaluationEngine:
         if self.initialized:
             return
         self.logger.info("Initializing Heuristic Evaluation Engine...")
-        self.llm_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
+        requested_provider = (settings.LLM_PROVIDER or "openai").strip().lower()
+        provider = requested_provider
+
+        # Keep `auto` deterministic for debugging/comparisons.
+        if provider == "auto":
+            if settings.OPENAI_API_KEY:
+                provider = "openai"
+            elif settings.GEMINI_API_KEY:
+                provider = "gemini"
+            else:
+                raise RuntimeError(
+                    "No LLM API key configured for auto mode. "
+                    "Set OPENAI_API_KEY or GEMINI_API_KEY."
+                )
+
+        if provider == "openai":
+            if not settings.OPENAI_API_KEY:
+                raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+
+            self.openai_client = AsyncOpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL
+            )
+            self.llm_client = self.openai_client
+            self.gemini_client = None
+            self.gemini_aio = None
+            self.llm_provider = "openai"
+
+        elif provider == "gemini":
+            if not settings.GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+
+            self.gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            self.gemini_aio = self.gemini_client.aio
+            self.openai_client = None
+            self.llm_client = None
+            self.llm_provider = "gemini"
+        else:
+            raise RuntimeError(
+                f"Unsupported LLM_PROVIDER '{settings.LLM_PROVIDER}'. "
+                "Use one of: openai, gemini, auto"
+            )
+
         if self.rag_kb is None:
             raise RuntimeError("RAGKnowledgeBase dependency missing. Inject via startup.")
         if not self.rag_kb.index_initialized:
             await self.rag_kb.initialize()
         self.initialized = True
-        self.logger.info("Heuristic Evaluation Engine initialized")
+        self.logger.info(
+            "Heuristic Evaluation Engine initialized (provider=%s, model=%s)",
+            self.llm_provider,
+            self._active_model_name()
+        )
+
+    def _has_active_llm(self) -> bool:
+        return (
+            (self.llm_provider == "openai" and self.openai_client is not None)
+            or (self.llm_provider == "gemini" and self.gemini_aio is not None)
+        )
+
+    def _active_model_name(self) -> str:
+        if self.llm_provider == "gemini":
+            return settings.GEMINI_MODEL
+        return settings.OPENAI_MODEL
+
+    def _extract_json_text(self, text: str) -> str:
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        return cleaned
+
+    async def _llm_generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3
+    ) -> str:
+        if self.llm_provider == "openai":
+            response = await self.openai_client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=temperature,
+                response_format={"type": "json_object"}
+            )
+            return (response.choices[0].message.content or "").strip() if response.choices else ""
+
+        if self.llm_provider == "gemini":
+            response = await self.gemini_aio.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperature,
+                    response_mime_type="application/json"
+                )
+            )
+            return (response.text or "").strip()
+
+        raise RuntimeError(f"Unsupported active LLM provider: {self.llm_provider}")
+
+    async def _llm_generate_text(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int = 200
+    ) -> str:
+        if self.llm_provider == "openai":
+            response = await self.openai_client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return (response.choices[0].message.content or "").strip() if response.choices else ""
+
+        if self.llm_provider == "gemini":
+            system_parts = []
+            user_parts = []
+            for msg in messages:
+                role = (msg.get("role") or "user").strip().lower()
+                content = (msg.get("content") or "").strip()
+                if not content:
+                    continue
+                if role == "system":
+                    system_parts.append(content)
+                else:
+                    user_parts.append(f"{role.upper()}:\n{content}")
+
+            response = await self.gemini_aio.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents="\n\n".join(user_parts) if user_parts else "",
+                config=types.GenerateContentConfig(
+                    system_instruction="\n\n".join(system_parts) if system_parts else None,
+                    temperature=temperature,
+                    max_output_tokens=max_tokens
+                )
+            )
+            return (response.text or "").strip()
+
+        raise RuntimeError(f"Unsupported active LLM provider: {self.llm_provider}")
 
     def _serialize_elements_for_llm(self, elements: List[UIElement]) -> str:
         """Serialize UI elements to JSON format for LLM consumption.
@@ -159,20 +314,20 @@ class HeuristicEvaluationEngine:
         heuristic_id: HeuristicId,
         elements: List[UIElement],
         detection_result: UIElementDetectionResult
-    ) -> List[HeuristicViolation]:
+    ) -> HeuristicLLMAnalysis:
         """Use LLM to evaluate heuristic violations.
         
         This method:
         1. Serializes UI elements to JSON
         2. Retrieves heuristic definition and criteria
         3. Constructs a prompt for the LLM
-        4. Parses LLM response into HeuristicViolation objects
+        4. Parses LLM response into HeuristicViolation objects and a short summary
         """
         # Get heuristic definition
         heuristic_def = NIELSEN_HEURISTICS.get(heuristic_id)
         if not heuristic_def:
             self.logger.error(f"No definition found for {heuristic_id.value}")
-            return []
+            return HeuristicLLMAnalysis(violations=[], llm_explanation=None)
 
         # Serialize elements
         elements_json = self._serialize_elements_for_llm(elements)
@@ -220,20 +375,37 @@ For each violation found, provide:
 - affected_elements: List of element content/text affected
 - recommendation: Specific actionable recommendation to fix
 
-Respond with a JSON array of violations. If no violations found, return empty array [].
+Also provide:
+- llm_explanation: A concise 2-3 sentence summary for this heuristic's key issues.
+  Prioritize violations accuracy first; summary quality is secondary.
+
+Respond with a JSON object in this shape:
+{{
+  "violations": [ ... ],
+  "llm_explanation": "..."
+}}
+
+If no violations are found, return:
+{{
+  "violations": [],
+  "llm_explanation": ""
+}}
 
 Example response format:
-[
-  {{
-    "criterion_id": "H1.2",
-    "severity": "major",
-    "description": "Submit button lacks visible feedback state",
-    "affected_elements": ["Submit"],
-    "recommendation": "Add hover and active states to provide visual feedback"
-  }}
-]
+{{
+  "violations": [
+    {{
+      "criterion_id": "H1.2",
+      "severity": "major",
+      "description": "Submit button lacks visible feedback state",
+      "affected_elements": ["Submit"],
+      "recommendation": "Add hover and active states to provide visual feedback"
+    }}
+  ],
+  "llm_explanation": "Users may not perceive clear system feedback after interacting with controls. Add visible interaction and status cues for primary actions."
+}}
 
-Violations:"""
+Response:"""
 
         # Enforce RAG usage if context exists
         if rag_context:
@@ -247,26 +419,27 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
 
         try:
             # Call LLM
-            response = await self.llm_client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a UX evaluation expert. Respond only with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"}
+            content = await self._llm_generate_json(
+                system_prompt="You are a UX evaluation expert. Respond only with valid JSON.",
+                user_prompt=prompt,
+                temperature=0.3
             )
 
             # Parse response
-            content = response.choices[0].message.content
             self.logger.debug(f"LLM response for {heuristic_id.value}: {content}")
             
-            # Try to extract JSON array from response
-            parsed = json.loads(content)
+            # Accept both the new object shape and older array-only responses.
+            parsed = json.loads(self._extract_json_text(content))
             
-            # Handle different response formats
+            llm_explanation_text = None
             violations_data = parsed
             if isinstance(parsed, dict):
+                llm_explanation_text = (
+                    parsed.get("llm_explanation")
+                    or parsed.get("summary")
+                    or parsed.get("explanation")
+                    or ""
+                ).strip() or None
                 # If wrapped in object, try common keys
                 for key in ['violations', 'results', 'findings', 'issues']:
                     if key in parsed:
@@ -275,7 +448,10 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
             
             if not isinstance(violations_data, list):
                 self.logger.warning(f"LLM response not a list: {violations_data}")
-                return []
+                return HeuristicLLMAnalysis(
+                    violations=[],
+                    llm_explanation=llm_explanation_text
+                )
 
             # Convert to HeuristicViolation objects
             violations = []
@@ -303,7 +479,10 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
                     self.logger.error(f"Error parsing violation: {e}, data: {v_data}")
                     continue
 
-            return violations
+            return HeuristicLLMAnalysis(
+                violations=violations,
+                llm_explanation=llm_explanation_text
+            )
 
         except Exception as e:
             self.logger.error(f"LLM evaluation failed for {heuristic_id.value}: {e}")
@@ -348,17 +527,13 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
         """
         self.logger.info(f"Evaluating heuristic {heuristic_id.value} with LLM")
 
-        # Use LLM-based evaluation for all heuristics
-        violations = await self._evaluate_with_llm(heuristic_id, elements, detection_result)
+        # One LLM call returns both violations (structured) and an optional summary.
+        analysis = await self._evaluate_with_llm(heuristic_id, elements, detection_result)
+        violations = analysis.violations
 
         score, explanation = self.calculate_score(violations, heuristic_id.value)
 
-        llm_explanation = await self._llm_explain_heuristic(
-            heuristic_id,
-            detection_result,
-            score,
-            violations
-        )
+        llm_explanation = analysis.llm_explanation
 
         return HeuristicScore(
             heuristic_id=heuristic_id.value,
@@ -523,7 +698,9 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
             evaluation_metadata={
                 "total_elements": len(detection_result.elements),
                 "evaluation_version": "2.0.0-llm",
-                "evaluation_method": "llm-based"
+                "evaluation_method": "llm-based",
+                "llm_provider": self.llm_provider,
+                "llm_model": self._active_model_name()
             }
         )
 
@@ -546,7 +723,7 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
         Uses only real OmniParser output fields (type, bbox, interactivity, content).
         Gracefully handles missing/optional fields.
         """
-        if not self.llm_client:
+        if not self._has_active_llm():
             return None
 
         try:
@@ -587,14 +764,13 @@ You have access to "Relevant examples and best practices" above (from the RAG Kn
                 }
             ]
 
-            response = await self.llm_client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            content = await self._llm_generate_text(
                 messages=messages,
                 temperature=0.2,
                 max_tokens=200
             )
 
-            return response.choices[0].message.content.strip() if response.choices else None
+            return content or None
 
         except Exception as exc:
             self.logger.error(f"LLM explanation failed for {heuristic_id.value}: {exc}")
